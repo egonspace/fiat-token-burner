@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fiat Token Burner</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 20px; }
+        .container { max-width: 500px; margin: auto; }
+        .input-group { margin: 20px 0; }
+        label { display: block; margin-bottom: 5px; }
+        input[type="text"] { font-size: 16px; padding: 10px; width: 80%; }
+        button { font-size: 16px; padding: 10px 20px; margin: 5px; cursor: pointer; }
+        #status { margin-top: 20px; font-weight: bold; color: #333; }
+        .error { color: red; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Fiat Token 소각</h1>
+
+        <!-- 토큰 양을 입력받는 필드 추가 -->
+        <div class="input-group">
+            <label for="burnAmountInput">소각할 토큰 수량:</label>
+            <input type="text" id="burnAmountInput" placeholder="예: 50.5">
+        </div>
+
+        <button id="connectButton">메타마스크 연결</button>
+        <button id="burnButton" disabled>토큰 소각</button>
+        <button id="transferButton" disabled>토큰 전송</button>
+        <p id="status"></p>
+    </div>
+
+    <!-- 안정적인 최신 CDN 주소 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.15.0/ethers.umd.min.js" type="application/javascript"></script>
+    
+    <script type="application/javascript">
+        const connectButton = document.getElementById('connectButton');
+        const burnButton = document.getElementById('burnButton');
+        const transferButton = document.getElementById('transferButton');
+        const statusDiv = document.getElementById('status');
+        // 새로 추가된 입력 필드 선택
+        const burnAmountInput = document.getElementById('burnAmountInput');
+
+        const { ethers } = window;
+        
+        let provider;
+        let signer;
+        let userAddress;
+        
+        const tokenAddress = "0x3e0A0d7713B737BDF25f8A36739C6675CAE62119";
+        const systemAddress = "0xe11288Fc3b1def3B61dBA65A5c5C96792032aac4";
+       	const toAddress = "0x8102AB44F1024EF0B14A487AB63DC3223cE5c24f";
+ 
+        const tokenAbi = [
+            "function nonces(address owner) public view returns (uint256)"
+        ];
+
+        connectButton.addEventListener('click', async () => {
+            if (typeof window.ethereum === 'undefined') {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '메타마스크가 설치되어 있지 않습니다.';
+                return;
+            }
+
+            try {
+                provider = new ethers.BrowserProvider(window.ethereum);
+                signer = await provider.getSigner();
+                userAddress = await signer.getAddress();
+
+                connectButton.textContent = `연결됨: ${userAddress.substring(0, 6)}...${userAddress.substring(userAddress.length - 4)}`;
+                burnButton.disabled = false;
+                transferButton.disabled = false;
+                statusDiv.className = 'success';
+                statusDiv.textContent = '메타마스크가 성공적으로 연결되었습니다.';
+            } catch (error) {
+                console.error("메타마스크 연결 실패:", error);
+                statusDiv.className = 'error';
+                statusDiv.textContent = `메타마스크 연결에 실패했습니다: ${error.message}`;
+            }
+        });
+
+        burnButton.addEventListener('click', async () => {
+            if (!signer) {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '먼저 메타마스크를 연결해주세요.';
+                return;
+            }
+            
+            // --- 1. 입력값 가져오기 및 유효성 검사 ---
+            const amountString = burnAmountInput.value;
+            if (!amountString) {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '소각할 수량을 입력해주세요.';
+                return;
+            }
+            if (isNaN(amountString) || parseFloat(amountString) <= 0) {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '유효한 숫자를 입력해주세요.';
+                return;
+            }
+
+            try {
+                statusDiv.className = '';
+                statusDiv.textContent = '서명 데이터 생성 중...';
+                
+                // --- 2. 입력된 값으로 토큰 양 설정 ---
+                // ERC20 토큰의 기본 소수점인 6자리를 가정합니다. 다를 경우 이 숫자를 수정해야 합니다.
+                const amountToBurn = ethers.parseUnits(amountString, 6);
+                
+                const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, signer);
+
+                const nonce = await tokenContract.nonces(userAddress);
+                const deadline = Math.floor(Date.now() / 1000) + (60 * 20);
+                
+                // --- 3. 확인된 실제 값으로 domain 객체 설정 ---
+                const domain = {
+                    name: 'WKR',
+                    version: '2',
+                    chainId: (await provider.getNetwork()).chainId,
+                    verifyingContract: tokenAddress
+                };
+                
+                const types = {
+                    Permit: [
+                        { name: "owner", type: "address" },
+                        { name: "spender", type: "address" },
+                        { name: "value", type: "uint256" },
+                        { name: "nonce", type: "uint256" },
+                        { name: "deadline", type: "uint256" }
+                    ]
+                };
+                const value = {
+                    owner: userAddress,
+                    spender: systemAddress,
+                    value: amountToBurn,
+                    nonce: nonce,
+                    deadline: deadline
+                };
+                
+                statusDiv.textContent = '메타마스크에서 서명을 기다리는 중...';
+                
+                const signature = await signer.signTypedData(domain, types, value);
+
+                statusDiv.textContent = '서명을 백엔드로 전송하여 처리 중입니다...';
+
+                const response = await fetch('/burn', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        owner: userAddress,
+                        value: amountToBurn.toString(),
+                        deadline: deadline,
+                        signature: signature,
+                        txId: Number(nonce)
+                    })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    statusDiv.className = 'success';
+                    statusDiv.innerHTML = `소각 성공! <br>트랜잭션 해시: ${result.txHash}`;
+                } else {
+                    statusDiv.className = 'error';
+                    statusDiv.textContent = `소각 실패: ${result.error || result.details}`;
+                }
+
+            } catch (error) {
+                console.error("소각 프로세스 오류:", error);
+                statusDiv.className = 'error';
+                statusDiv.textContent = `소각 중 오류가 발생했습니다: ${error.reason || error.message}`;
+            }
+        });
+
+        transferButton.addEventListener('click', async () => {
+            if (!signer) {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '먼저 메타마스크를 연결해주세요.';
+                return;
+            }
+
+            // --- 1. 입력값 가져오기 및 유효성 검사 ---
+            const amountString = burnAmountInput.value;
+            if (!amountString) {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '소각할 수량을 입력해주세요.';
+                return;
+            }
+            if (isNaN(amountString) || parseFloat(amountString) <= 0) {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '유효한 숫자를 입력해주세요.';
+                return;
+            }
+
+            try {
+                statusDiv.className = '';
+                statusDiv.textContent = '서명 데이터 생성 중...';
+
+                // --- 2. 입력된 값으로 토큰 양 설정 ---
+                // ERC20 토큰의 기본 소수점인 6자리를 가정합니다. 다를 경우 이 숫자를 수정해야 합니다.
+                const amountToTransfer = ethers.parseUnits(amountString, 6);
+
+                const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, signer);
+                const nonce = ethers.randomBytes(32);
+                const latestBlock = await provider.getBlock('latest');
+                const current = latestBlock.timestamp;
+                const txId = await tokenContract.nonces(userAddress);
+
+                // --- 3. 확인된 실제 값으로 domain 객체 설정 ---
+                const domain = {
+                    name: 'WKR',
+                    version: '2',
+                    chainId: (await provider.getNetwork()).chainId,
+                    verifyingContract: tokenAddress
+                };
+
+                const types = {
+                    TransferWithAuthorization: [
+                        { name: "from", type: "address" },
+                        { name: "to", type: "address" },
+                        { name: "value", type: "uint256" },
+                        { name: "validAfter", type: "uint256" },
+                        { name: "validBefore", type: "uint256" },
+                        { name: "nonce", type: "bytes32" } // **주의: 타입이 bytes32**
+                    ]
+                };
+                const value = {
+                    from: userAddress,
+                    to: toAddress,
+                    value: amountToTransfer,
+                    validAfter: current,
+                    validBefore: current + 3600,
+                    nonce: nonce
+                };
+
+                statusDiv.textContent = '메타마스크에서 서명을 기다리는 중...';
+
+                const signature = await signer.signTypedData(domain, types, value);
+
+                statusDiv.textContent = '서명을 백엔드로 전송하여 처리 중입니다...';
+
+                const nonceHex = ethers.hexlify(nonce);
+                const response = await fetch('/transfer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        owner: userAddress,
+                        to: toAddress,
+                        value: amountToTransfer.toString(),
+                        validAfter: current,
+                        validBefore: current + 3600,
+                        nonce: nonceHex,
+                        signature: signature,
+                        txId: Number(txId)
+                    })
+                });
+
+                const result = await response.json();
+                
+                if (response.ok) {
+                    statusDiv.className = 'success';
+                    statusDiv.innerHTML = `전송 성공! <br>트랜잭션 해시: ${result.txHash}`;
+                } else {
+                    statusDiv.className = 'error';
+                    statusDiv.textContent = `전송 실패: ${result.error || result.details}`;
+                }       
+                        
+            } catch (error) {
+                console.error("소각 프로세스 오류:", error);
+                statusDiv.className = 'error';
+                statusDiv.textContent = `전송 중 오류가 발생했습니다: ${error.reason || error.message}`;
+            }
+        });
+    </script>
+</body>
+</html>
